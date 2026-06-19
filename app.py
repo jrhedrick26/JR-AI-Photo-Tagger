@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import time
+import shutil
 from datetime import datetime
 import google.generativeai as genai
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
@@ -21,6 +22,25 @@ import exiftool
 
 CONFIG_FILE_PATH = "config.json"
 LOGS_DIR = "logs"
+
+def find_exiftool_executable():
+    """Locate ExifTool executable, checking standard macOS installation paths explicitly for standalone app context."""
+    # 1. Check default system environment PATH
+    path = shutil.which("exiftool")
+    if path:
+        return path
+    
+    # 2. Check standard macOS installation paths explicitly (Homebrew / Official Pkg)
+    standard_mac_paths = [
+        "/opt/homebrew/bin/exiftool",
+        "/usr/local/bin/exiftool"
+    ]
+    for p in standard_mac_paths:
+        if os.path.exists(p) and os.access(p, os.X_OK):
+            return p
+            
+    return "exiftool" # Fallback to default string string if not resolved explicitly
+
 
 def load_preview_image(file_path):
     """Intelligently load images, using rawpy for proprietary RAWs and Pillow for standard formats."""
@@ -160,7 +180,7 @@ class AIAnalysisWorker(QThread):
 
         total_files = len(self.file_paths)
         
-        with exiftool.ExifToolHelper() as et:
+        with exiftool.ExifToolHelper(executable=find_exiftool_executable()) as et:
             for index, file_path in enumerate(self.file_paths):
                 if not os.path.exists(file_path):
                     continue
@@ -259,7 +279,7 @@ class FileWriteWorker(QThread):
         log_content += f"Batch Notes: {self.batch_context}\n"
         log_content += "="*60 + "\n\n"
         
-        with exiftool.ExifToolHelper() as et:
+        with exiftool.ExifToolHelper(executable=find_exiftool_executable()) as et:
             for index, (file_path, title, caption, kw_str) in enumerate(self.run_data):
                 base_name = os.path.basename(file_path)
                 try:
@@ -296,7 +316,7 @@ class FileWriteWorker(QThread):
         mins, secs = divmod(int(duration), 60)
         
         log_content += "\n" + "="*60 + "\n"
-        log_content += f"BATCH AUDIT SUMMARY\n"
+        log_content += f"BATCH AUD SUMMARY\n"
         log_content += f"Total Files Processed: {total_files}\n"
         log_content += f"Successful Writes: {success_count}\n"
         log_content += f"Failed Writes: {total_files - success_count}\n"
@@ -341,7 +361,7 @@ class PhotoMetadataApp(QWidget):
     def check_exiftool(self):
         """Startup check to ensure ExifTool is installed on the user's system."""
         try:
-            with exiftool.ExifToolHelper() as et:
+            with exiftool.ExifToolHelper(executable=find_exiftool_executable()) as et:
                 pass
         except Exception:
             QMessageBox.critical(self, "Missing Dependency: ExifTool", 
@@ -589,7 +609,7 @@ class PhotoMetadataApp(QWidget):
             "<b>4. Compiling the Queue:</b> Build batches dynamically using <b>+ Add Files</b> and <b>+ Add Folder</b>. You can repeatedly add multiple folders to create deep processing pipelines. The application auto-filters files for RAW sensor files (Sony ARW, Canon CR2, Nikon NEF, DNG), TIFFs, and JPEGs.<br><br>"
             "<b>5. Live Auditing & Correction:</b> Run the AI engine. Select any row to fire up fluid background preview frames and read formatted metadata card strings instantly. Double-click spreadsheet fields to execute swift edits or append corrections manually.<br><br>"
             "<b>6. Writing & Audit Logs:</b> Click <b>Commit Changes</b> to have ExifTool embed data directly into file metadata headers. Every commit run automatically creates a comprehensive tracking log inside the local 'logs' directory, recording runtime parameters, bounds, and write results.<br><br>"
-            "<b>7. Lightroom Syncing:</b> To map the files into Lightroom Classic, highlight your batch folder, right-click, and select <b>Metadata -> Read Metadata from File</b>."
+            "<b>7. Lightroom Syncing:</b> To view your changes in Lightroom Classic, highlight your batch folder, right-click, and select <b>Metadata -> Read Metadata from File</b>."
         )
         dialog = QDialog(self)
         dialog.setWindowTitle("Workspace Documentation")

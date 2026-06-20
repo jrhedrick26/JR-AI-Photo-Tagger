@@ -1,4 +1,4 @@
-# JR AI Photo Tagger 📸🤖 (macOS Workspace)
+# JR AI Photo Tagger 📸🤖
 
 An open-source, professional-grade desktop workspace that leverages Google's Gemini 2.5 Flash AI to automatically generate highly accurate, contextual, and editorial Titles, Captions, and Keywords for your photography batches. 
 
@@ -6,7 +6,7 @@ It reads camera EXIF/GPS context and safely writes metadata directly inside your
 
 ---
 
-## 🚀 How to Install & Run (No Terminal Required)
+## 🍏 macOS Installation Guide (No Terminal Required)
 
 **1. Install the ExifTool Engine**
 The app relies on ExifTool to bake metadata safely into your photos without altering image pixels.
@@ -30,24 +30,25 @@ Because this is open-source software distributed outside the official Apple App 
 
 ---
 
-## 🔑 Activating the AI Core
+## 🪟 Windows Installation Guide (No Terminal Required)
 
-1. Generate a free Gemini API Key via [Google AI Studio](https://aistudio.google.com/app/apikey).
-2. Open the app, paste your key into the top-row input field, and you are ready to begin processing your photo batches!
+**1. Set Up Your App Folder**
+* Create a brand new folder on your computer named `JR AI Photo Tagger` (e.g., in your Documents or Desktop).
 
----
+**2. Download the App Executable**
+* Go to the **Releases** section on the right-hand sidebar of this GitHub repository page.
+* Download the **`JR_AI_Photo_Tagger.exe`** file.
+* Move the downloaded `.exe` file straight into the new folder you just created.
 
-## 💻 For Developers (Natively Run Source Code)
+**3. Download the ExifTool Engine**
+Windows requires placing the ExifTool engine directly alongside the application executable.
+* Go to the official website: [exiftool.org](https://exiftool.org/).
+* Download the **Windows Executable** zip file (e.g., `exiftool-XX.XX.zip`).
+* Unzip it, find the file named `exiftool(-k).exe`, and drag it into your application folder.
+* **CRITICAL STEP:** Rename that file from `exiftool(-k).exe` to exactly **`exiftool.exe`**.
 
-If you are a developer looking to adapt the script natively or contribute directly to prompt iterations:
-
-```bash
-# Clone the repository
-git clone [https://github.com/YOUR_GITHUB_USERNAME/JR-AI-Photo-Tagger.git](https://github.com/YOUR_GITHUB_USERNAME/JR-AI-Photo-Tagger.git)
-cd JR-AI-Photo-Tagger
-
-# Setup cross-platform packages
-python3 -m pip install -r requirements.txt
-
-# Launch raw application
-python3 app.py
+Your folder should now look like this:
+```text
+📂 JR AI Photo Tagger
+ ├── 📄 JR_AI_Photo_Tagger.exe
+ └── 📄 exiftool.exe

@@ -14,11 +14,17 @@ from PyQt6.QtGui import QIcon, QPixmap, QImage
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PIL import Image
 import numpy as np
+import keyring
+from keyring.errors import KeyringError
 
 # Disable Pillow's size limit to safely process massive panoramas
 Image.MAX_IMAGE_PIXELS = None
 
 import exiftool
+
+# Constants for secure credential storage
+KEYRING_SERVICE_NAME = "JR-AI-Photo-Tagger"
+KEYRING_API_KEY_USER = "gemini_api_key"
 
 def get_app_data_dir():
     """Creates and returns a safe, writable directory in the user's Documents folder."""
@@ -177,6 +183,7 @@ class AIAnalysisWorker(QThread):
             model = genai.GenerativeModel('gemini-2.5-flash')
         except Exception as e:
             self.log_signal.emit(f"✕ API Configuration Error: {str(e)}")
+            self.log_signal.emit("💡 Get your free API key at: https://ai.google.dev/")
             self.finished_signal.emit("Configuration failed.")
             return
 
@@ -227,11 +234,11 @@ class AIAnalysisWorker(QThread):
                         
                         Return a JSON object with EXACTLY these three keys: 'title', 'caption', 'keywords'.
                         
-                        1. 'title': A highly accurate, production-ready title (max {t_max} words). Describe the primary subject clearly. To avoid repetitive titles in a batch, you MUST include the most prominent unique foreground element or specific angle (e.g., 'Overlooking Train Tracks', 'Close-Up', 'Street Level'). The title MUST read smoothly as a natural, editorial phrase (e.g., 'Aerial View of the Charlotte Skyline at Golden Hour'), rather than a clunky list of keywords. IF the lighting condition is dramatic or highly specific (e.g., 'Golden Hour', 'Blue Hour', 'Night', 'Neon'), include it. Do NOT include generic lighting terms like 'Midday' or 'Daylight' in the title.
+                        1. 'title': A highly accurate, production-ready title (max {t_max} words). Describe the primary subject clearly. To avoid repetitive titles in a batch, you MUST include th[...]
                         
-                        2. 'caption': A straightforward, factual catalog sentence (maximum {c_max} words) analyzed through the lens of {active_style_guide}. Describe exactly what the subject is, the setting, and the lighting. IF landmarks are visible, explicitly name the 1 or 2 most prominent ones. This MUST be a single, grammatically correct, and flowing sentence. Do NOT use semicolons, lists, or fragmented phrasing. If you hit the word limit, prioritize the main subject over extra adjectives. NEVER use flowery, poetic, or overly artistic language. Just state the facts.
+                        2. 'caption': A straightforward, factual catalog sentence (maximum {c_max} words) analyzed through the lens of {active_style_guide}. Describe exactly what the subject is, [...]
                         
-                        3. 'keywords': An array of up to {k_max} highly specific tags. Inject stylistic elements for {active_style_guide}, alongside artistic terms, accurate lighting, location, and core subjects. DO NOT use generic terms like 'picture', 'image', 'photo', or 'daytime'. DO NOT mash words together into camelCase or hashtags. Always use natural spaces between words in a single tag (e.g., use 'North Carolina' instead of 'NorthCarolina'). Ensure all Keywords are formatted in Title Case.
+                        3. 'keywords': An array of up to {k_max} highly specific tags. Inject stylistic elements for {active_style_guide}, alongside artistic terms, accurate lighting, location, a[...]
                         """
                         
                         # Network & Rate Limit Catching Loop
@@ -598,7 +605,7 @@ class PhotoMetadataApp(QWidget):
             try:
                 with open(CONFIG_FILE_PATH, "r") as f:
                     data = json.load(f)
-                    self.api_input.setText(data.get("api_key", ""))
+                    # Load non-sensitive config
                     self.creator_input.setText(data.get("creator", ""))
                     self.copyright_input.setText(data.get("copyright", ""))
                     self.app_settings["title_max_words"] = data.get("title_max_words", 7)
@@ -607,10 +614,18 @@ class PhotoMetadataApp(QWidget):
                     self.app_settings["backup_originals"] = data.get("backup_originals", True)
             except Exception:
                 pass
+        
+        # Load API key from secure storage
+        try:
+            api_key = keyring.get_password(KEYRING_SERVICE_NAME, KEYRING_API_KEY_USER)
+            if api_key:
+                self.api_input.setText(api_key)
+        except KeyringError:
+            # Keyring unavailable on this system, user will need to enter manually
+            pass
 
     def save_config(self):
         config_data = {
-            "api_key": self.api_input.text().strip(),
             "creator": self.creator_input.text().strip(),
             "copyright": self.copyright_input.text().strip(),
             "title_max_words": self.app_settings["title_max_words"],
@@ -623,6 +638,15 @@ class PhotoMetadataApp(QWidget):
                 json.dump(config_data, f)
         except Exception:
             pass
+        
+        # Save API key to secure storage (not in config file)
+        api_key = self.api_input.text().strip()
+        if api_key:
+            try:
+                keyring.set_password(KEYRING_SERVICE_NAME, KEYRING_API_KEY_USER, api_key)
+            except KeyringError:
+                # Keyring unavailable; API key will need to be re-entered next time
+                pass
 
     def open_settings(self):
         dialog = SettingsDialog(self.app_settings, self)
@@ -684,14 +708,17 @@ class PhotoMetadataApp(QWidget):
 
     def show_help_guide(self):
         help_text = (
-            "<h3>📋 JR AI Photo Tagger Manual (macOS Edition)</h3><hr>"
-            "<b>1. Setup & Configuration:</b> Enter your Gemini API key, Creator name, and Copyright details. These profiles securely save locally to your Documents folder.<br><br>"
-            "<b>2. Adjusting AI Directives:</b> Click <b>⚙️ Settings</b> to establish word limits and configure File Backup protocols. Use the <b>AI Style</b> dropdown to change the semantic parsing perspective (e.g., Drone vs. Street Photography).<br><br>"
-            "<b>3. The Power of 'Batch Notes':</b> The AI only reads pixels and EXIF parameters. It cannot know client names or project details. Use the <b>Batch Notes</b> field to supply off-camera context <i>(e.g., 'Juneberry Jams Concert' or 'Nike Spring Catalog')</i> so the AI seamlessly links this data into captions and tags.<br><br>"
-            "<b>4. Compiling the Queue:</b> Build batches dynamically using <b>+ Add Files</b> and <b>+ Add Folder</b>. You can repeatedly add multiple folders to create deep processing pipelines. The application auto-filters files for RAW sensor files (Sony ARW, Canon CR2, Nikon NEF, DNG), TIFFs, and JPEGs.<br><br>"
-            "<b>5. Live Auditing & Correction:</b> Run the AI engine. Select any row to fire up fluid background preview frames and read formatted metadata card strings instantly. Double-click spreadsheet fields to execute swift edits or append corrections manually.<br><br>"
-            "<b>6. Writing & Audit Logs:</b> Click <b>Commit Changes</b> to have ExifTool embed data directly into file metadata headers. Every commit run automatically creates a comprehensive tracking log inside the 'JR AI Photo Tagger' directory in your Mac's Documents folder.<br><br>"
-            "<b>7. Lightroom Syncing:</b> To map the files into Lightroom Classic, highlight your batch folder, right-click, and select <b>Metadata -> Read Metadata from File</b>."
+            "<h3>📋 JR AI Photo Tagger Manual</h3><hr>"
+            "<b>1. Setup & Configuration:</b> Enter your Gemini API key, Creator name, and Copyright details. Your API key is securely stored on your computer using your system's credential manager, so you only need to enter it once.<br><br>"
+            "<b>2. Getting Your API Key:</b> Visit <a href='https://ai.google.dev/'>https://ai.google.dev/</a> to create a free Gemini API key. New users typically get $300 in monthly free credits.<br><br>"
+            "<b>3. Adjusting AI Directives:</b> Click <b>⚙️ Settings</b> to establish word limits for titles and captions, and configure file backup protocols. Use the <b>AI Style</b> dropdown to change the semantic analysis approach for your specific photography genre.<br><br>"
+            "<b>4. The Power of 'Batch Notes':</b> The AI only reads pixels and EXIF metadata (date, location, camera model). It cannot know client names or project details. Use the <b>Batch Notes</b> field to supply off-camera context like 'Corporate annual gala 2026' or 'Sunset beach engagement shoot'.<br><br>"
+            "<b>5. Compiling the Queue:</b> Build batches dynamically using <b>+ Add Files</b> and <b>+ Add Folder</b>. You can repeatedly add multiple folders to create deep processing pipelines. The app calculates estimated API costs in real-time based on image count.<br><br>"
+            "<b>6. Live Auditing & Correction:</b> Run the AI engine by clicking <b>Generate AI</b>. Select any row in the results table to preview the image on the right and read the generated metadata instantly. You can manually edit titles, captions, and keywords directly in the table cells before committing.<br><br>"
+            "<b>7. Writing & Audit Logs:</b> Click <b>Commit Changes</b> to have ExifTool embed data directly into your original image files. Every commit run automatically creates a comprehensive transaction log saved to ~/Documents/JR AI Photo Tagger/logs/ with timestamps, file names, and write status.<br><br>"
+            "<b>8. Lightroom Syncing:</b> After committing, open Adobe Lightroom Classic, select your processed photos, and go to <b>Metadata → Read Metadata from File</b> to sync the newly written metadata into Lightroom's database. Your photos are now permanently archived with professional metadata.<br><br>"
+            "<b>9. Backup & Safety:</b> By default, the app keeps original file backups (.bak files) before writing metadata. You can disable this in Settings if disk space is limited, but backups are recommended for first-time users.<br><br>"
+            "<b>10. Troubleshooting:</b> If you see 'API Rate Limit' warnings, the app automatically throttles requests. For permission errors, grant your app access in System Settings → Privacy & Security → Files and Folders."
         )
         dialog = QDialog(self)
         dialog.setWindowTitle("Workspace Documentation")
@@ -699,7 +726,7 @@ class PhotoMetadataApp(QWidget):
         text_widget = QTextEdit()
         text_widget.setHtml(help_text)
         text_widget.setReadOnly(True)
-        text_widget.setMinimumSize(500, 520)
+        text_widget.setMinimumSize(600, 650)
         dialog_layout.addWidget(text_widget)
         dialog.setLayout(dialog_layout)
         dialog.exec()
@@ -836,7 +863,7 @@ class PhotoMetadataApp(QWidget):
     def run_ai_analysis(self):
         api_key = self.api_input.text().strip()
         if not api_key:
-            QMessageBox.warning(self, "Missing API Key", "Please paste your Gemini API key.")
+            QMessageBox.warning(self, "Missing API Key", "Please paste your Gemini API key.\n\nGet a free key at: https://ai.google.dev/")
             return
 
         self.save_config()

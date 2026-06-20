@@ -42,11 +42,20 @@ CONFIG_FILE_PATH = os.path.join(APP_DIR, "config.json")
 LOGS_DIR = os.path.join(APP_DIR, "logs")
 
 def find_exiftool_executable():
-    """Locate ExifTool executable safely for standalone macOS environments."""
+    """Locate ExifTool executable safely for standalone macOS and Windows environments."""
+    # 1. Check system path
     path = shutil.which("exiftool")
     if path:
         return path
     
+    # 2. Check explicitly next to the standalone Windows executable
+    if getattr(sys, 'frozen', False):
+        exe_dir = os.path.dirname(sys.executable)
+        win_path = os.path.join(exe_dir, "exiftool.exe")
+        if os.path.exists(win_path):
+            return win_path
+
+    # 3. Check standard macOS paths
     standard_mac_paths = [
         "/opt/homebrew/bin/exiftool",
         "/usr/local/bin/exiftool"
@@ -268,11 +277,11 @@ class AIAnalysisWorker(QThread):
                         
                         Return a JSON object with EXACTLY these three keys: 'title', 'caption', 'keywords'.
                         
-                        1. 'title': A highly accurate, production-ready title (max {t_max} words). Describe the primary subject clearly. To avoid repetitive titles in a batch, you MUST include th[...]
+                        1. 'title': A punchy, highly accurate, production-ready title (maximum {t_max} words). Focus entirely on the primary subject, the specific angle, and the mood/lighting (e.g., 'Golden Hour', 'Night', 'Neon'). NEVER include the date or time format (e.g., 2024, 11-21) in the title. Do NOT waste words starting the title with "Aerial View of" or "Overhead of"—put those descriptors in the keywords instead. To avoid repetitive titles in a batch, focus on the UNIQUE visual composition of the image (e.g., 'Symmetrical Skyline', 'Close-Up', 'Framed by Trees').
                         
-                        2. 'caption': A straightforward, factual catalog sentence (maximum {c_max} words) analyzed through the lens of {active_style_guide}. Describe exactly what the subject is, [...]
+                        2. 'caption': A straightforward, factual catalog sentence (maximum {c_max} words) analyzed through the lens of {active_style_guide}. Describe exactly what the subject is, the setting, and the lighting. IF landmarks are visible, explicitly name the 1 or 2 most prominent ones. CRITICAL: Vary your sentence structures. Do NOT begin every caption with "An aerial view..." or "The...". NEVER include the EXIF date in the text. This MUST be a single, grammatically correct, and flowing sentence without semicolons or lists.
                         
-                        3. 'keywords': An array of up to {k_max} highly specific tags. Inject stylistic elements for {active_style_guide}, alongside artistic terms, accurate lighting, location, a[...]
+                        3. 'keywords': An array of up to {k_max} highly specific tags. Inject stylistic elements for {active_style_guide}, alongside artistic terms, accurate lighting, location, and core subjects. DO NOT use generic terms like 'picture', 'image', 'photo', or 'daytime'. DO NOT mash words together into camelCase or hashtags. Always use natural spaces between words in a single tag (e.g., use 'North Carolina' instead of 'NorthCarolina'). Ensure all Keywords are formatted in Title Case.
                         """
                         
                         # Network & Rate Limit Catching Loop
@@ -305,7 +314,10 @@ class AIAnalysisWorker(QThread):
                             if hasattr(img, 'close'): img.close()
                             break
 
-                        metadata = json.loads(response.text)
+                        # Safety cleaner for markdown formatting
+                        raw_json_str = response.text.strip().removeprefix('```json').removesuffix('```').strip()
+                        metadata = json.loads(raw_json_str)
+                        
                         kw_list = metadata.get("keywords", [])
                         if isinstance(kw_list, str):
                             kw_list = [k.strip() for k in kw_list.split(",") if k.strip()]

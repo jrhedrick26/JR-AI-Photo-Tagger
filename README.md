@@ -6,10 +6,10 @@ It reads camera EXIF/GPS context and safely writes metadata directly inside your
 
 ---
 
-## 📋 Quick Start
+## 📋 Quick Start (No Terminal Required)
 
 ### macOS
-1. Install [ExifTool](https://exiftool.org/) via Homebrew: `brew install exiftool`
+1. Download and install [ExifTool](https://exiftool.org/) (macOS Package .pkg)
 2. Download **JR_AI_Photo_Tagger.dmg** from [Releases](https://github.com/jrhedrick26/JR-AI-Photo-Tagger/releases)
 3. Drag the app to your Applications folder
 4. Get a free Gemini API key at [ai.google.dev](https://ai.google.dev/)
@@ -29,15 +29,17 @@ It reads camera EXIF/GPS context and safely writes metadata directly inside your
 
 ### 1. Install ExifTool Engine
 
-**Option A: Homebrew (Recommended)**
+**Option A: GUI Installer (Recommended - No Terminal)**
+* Go to [exiftool.org](https://exiftool.org/)
+* Download the **macOS Package (.pkg)** installer
+* Double-click the `.pkg` file and follow the installer prompts
+* Done! ExifTool is now installed
+
+**Option B: Homebrew (For Advanced Users)**
+If you have Homebrew installed, you can also run:
 ```bash
 brew install exiftool
 ```
-
-**Option B: Direct Download**
-* Go to [exiftool.org](https://exiftool.org/)
-* Download the **macOS Package (.pkg)** installer
-* Run the installer to set up the background engine
 
 ### 2. Download the App Installer
 * Go to the **[Releases](https://github.com/jrhedrick26/JR-AI-Photo-Tagger/releases)** page
@@ -193,7 +195,7 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) file for 
 ## 🐛 Troubleshooting
 
 ### "ExifTool is not installed"
-**macOS:** Run `brew install exiftool`  
+**macOS:** Make sure you downloaded and ran the ExifTool `.pkg` installer from [exiftool.org](https://exiftool.org/), or install via Homebrew with `brew install exiftool`  
 **Windows:** Make sure `exiftool.exe` is in the same folder as the app, and the filename is exactly correct (no `-k` suffix)
 
 ### "API Key rejected" or "Configuration Error"

@@ -3,6 +3,8 @@ import sys
 import json
 import time
 import shutil
+import subprocess
+import io
 from datetime import datetime
 import google.generativeai as genai
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
@@ -21,6 +23,13 @@ from keyring.errors import KeyringError
 Image.MAX_IMAGE_PIXELS = None
 
 import exiftool
+
+try:
+    import rawpy
+    RAWPY_AVAILABLE = True
+except ImportError:
+    RAWPY_AVAILABLE = False
+
 
 # Constants for secure credential storage
 KEYRING_SERVICE_NAME = "JR-AI-Photo-Tagger"
@@ -67,18 +76,53 @@ def find_exiftool_executable():
     return "exiftool" 
 
 
+def extract_embedded_preview(file_path):
+    """Attempt to extract embedded JPEG preview from RAW metadata using ExifTool."""
+    exiftool_path = find_exiftool_executable()
+    if not exiftool_path or exiftool_path == "exiftool":
+        exiftool_path = shutil.which("exiftool")
+        if not exiftool_path:
+            return None
+            
+    preview_tags = ["-PreviewImage", "-JpgFromRaw", "-ThumbnailImage"]
+    for tag in preview_tags:
+        try:
+            res = subprocess.run(
+                [exiftool_path, "-b", tag, file_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5
+            )
+            if res.returncode == 0 and len(res.stdout) > 100:
+                return res.stdout
+        except Exception:
+            pass
+    return None
+
+
 def load_preview_image(file_path):
     """Intelligently load images, handling macOS Permission constraints."""
     try:
         raw_extensions = ['.arw', '.cr2', '.nef', '.dng', '.raf', '.orf']
         if any(file_path.lower().endswith(ext) for ext in raw_extensions):
-            try:
-                import rawpy
-                with rawpy.imread(file_path) as raw:
-                    rgb = raw.postprocess(use_camera_wb=True, half_size=True)
-                return Image.fromarray(rgb)
-            except Exception as e:
-                print(f"rawpy failed on {file_path}, falling back to standard loader. Error: {e}")
+            # Try embedded preview extraction first (50x faster)
+            preview_bytes = extract_embedded_preview(file_path)
+            if preview_bytes:
+                try:
+                    return Image.open(io.BytesIO(preview_bytes))
+                except Exception as e:
+                    print(f"Failed to open extracted preview for {file_path}: {e}")
+
+            # Fallback to rawpy
+            if RAWPY_AVAILABLE:
+                try:
+                    with rawpy.imread(file_path) as raw:
+                        rgb = raw.postprocess(use_camera_wb=True, half_size=True)
+                    return Image.fromarray(rgb)
+                except Exception as e:
+                    print(f"rawpy failed on {file_path}, falling back to standard loader. Error: {e}")
+            else:
+                print(f"rawpy is not installed or available, falling back to standard loader for {file_path}")
         
         return Image.open(file_path)
     except PermissionError:
@@ -99,7 +143,8 @@ class ImagePreviewWorker(QThread):
             img.thumbnail((1200, 1200))
             img = img.convert("RGBA")
             data = img.tobytes("raw", "RGBA")
-            qim = QImage(data, img.width, img.height, QImage.Format.Format_RGBA8888)
+            # Create a deep copy of QImage to avoid memory garbage collection issues in PyQt6
+            qim = QImage(data, img.width, img.height, QImage.Format.Format_RGBA8888).copy()
             
             if not self.is_cancelled:
                 self.preview_ready_signal.emit(qim, self.file_path)
@@ -171,9 +216,25 @@ class SettingsDialog(QDialog):
         self.backup_check = QCheckBox("Keep Original File Backups (Recommended)")
         self.backup_check.setChecked(self.settings.get("backup_originals", True))
         
+        self.model_combo = QComboBox()
+        self.model_combo.setEditable(True)
+        self.model_combo.addItems([
+            "gemini-3.5-flash",
+            "gemini-3.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.5-pro"
+        ])
+        current_model = self.settings.get("gemini_model", "gemini-3.5-flash")
+        idx = self.model_combo.findText(current_model)
+        if idx >= 0:
+            self.model_combo.setCurrentIndex(idx)
+        else:
+            self.model_combo.setCurrentText(current_model)
+
         form_layout.addRow("Max Title Words:", self.title_spin)
         form_layout.addRow("Max Caption Words:", self.caption_spin)
         form_layout.addRow("Max Keywords:", self.keyword_spin)
+        form_layout.addRow("Gemini Model:", self.model_combo)
         form_layout.addRow("", self.backup_check)
         
         layout.addLayout(form_layout)
@@ -188,7 +249,8 @@ class SettingsDialog(QDialog):
             "title_max_words": self.title_spin.value(),
             "caption_max_words": self.caption_spin.value(),
             "keyword_max_count": self.keyword_spin.value(),
-            "backup_originals": self.backup_check.isChecked()
+            "backup_originals": self.backup_check.isChecked(),
+            "gemini_model": self.model_combo.currentText().strip()
         }
 
 
@@ -221,7 +283,8 @@ class AIAnalysisWorker(QThread):
     def run(self):
         try:
             genai.configure(api_key=self.api_key)
-            model = genai.GenerativeModel('gemini-2.5-flash')
+            model_name = self.settings.get("gemini_model", "gemini-3.5-flash")
+            model = genai.GenerativeModel(model_name)
         except Exception as e:
             error_msg = str(e)
             self.log_signal.emit(f"✕ API Configuration Error: {error_msg}")
@@ -260,12 +323,21 @@ class AIAnalysisWorker(QThread):
                     base_name = os.path.basename(file_path)
                     self.log_signal.emit(f"Analyzing visual assets for: {base_name}...")
 
+                    # 1. Attempt loading image locally (skip this file if file is corrupted/unreadable)
                     try:
                         gps_ctx, time_ctx = self.get_image_context(et, file_path)
                         img = load_preview_image(file_path)
                         img.thumbnail((1024, 1024))
                         rgb_img = img.convert("RGB")
+                    except PermissionError as pe:
+                        self.log_signal.emit(f"✕ Permission Denied: macOS blocked access to {base_name}. Go to System Settings -> Privacy & Security -> Files and Folders.")
+                        continue
+                    except Exception as e:
+                        self.log_signal.emit(f"✕ Skipping file error on {base_name} (loading/processing): {str(e)}\n")
+                        continue
 
+                    # 2. Run API generation with retry and fatal error check
+                    try:
                         user_context_injection = ""
                         if self.batch_context:
                             user_context_injection = f"CRITICAL USER CONTEXT NOTES: Use this exact context/event/client info to guide details: '{self.batch_context}'\n"
@@ -284,7 +356,6 @@ class AIAnalysisWorker(QThread):
                         3. 'keywords': An array of up to {k_max} highly specific tags. Inject stylistic elements for {active_style_guide}, alongside artistic terms, accurate lighting, location, and core subjects. DO NOT use generic terms like 'picture', 'image', 'photo', or 'daytime'. DO NOT mash words together into camelCase or hashtags. Always use natural spaces between words in a single tag (e.g., use 'North Carolina' instead of 'NorthCarolina'). Ensure all Keywords are formatted in Title Case.
                         """
                         
-                        # Network & Rate Limit Catching Loop
                         success = False
                         for attempt in range(3):
                             if self.is_cancelled:
@@ -300,19 +371,25 @@ class AIAnalysisWorker(QThread):
                                 err_msg = str(api_e).lower()
                                 if "429" in err_msg or "quota" in err_msg or "exhausted" in err_msg:
                                     self.log_signal.emit(f"⚠️ API Rate Limit hit. Throttling for 15 seconds to recover...")
-                                    time.sleep(15)
+                                    for _ in range(15):
+                                        if self.is_cancelled:
+                                            break
+                                        time.sleep(1)
                                 elif "network" in err_msg or "connect" in err_msg or "unavailable" in err_msg:
                                     self.log_signal.emit(f"⚠️ Network connection issue. Retrying in 10 seconds...")
-                                    time.sleep(10)
+                                    for _ in range(10):
+                                        if self.is_cancelled:
+                                            break
+                                        time.sleep(1)
                                 else:
                                     raise api_e
-
-                        if not success and not self.is_cancelled:
-                            raise Exception("Failed after maximum network retries.")
 
                         if self.is_cancelled:
                             if hasattr(img, 'close'): img.close()
                             break
+
+                        if not success:
+                            raise Exception("Failed after maximum network retries.")
 
                         # Safety cleaner for markdown formatting
                         raw_json_str = response.text.strip().removeprefix('```json').removesuffix('```').strip()
@@ -334,13 +411,18 @@ class AIAnalysisWorker(QThread):
                         self.result_ready_signal.emit(file_path, cleaned_metadata)
                         self.log_signal.emit(f"✓ AI analysis received for {base_name}")
                         
-                        time.sleep(3) # Standard Rate Limiter
+                        for _ in range(3): # Standard Rate Limiter sleep
+                            if self.is_cancelled:
+                                break
+                            time.sleep(1)
 
-                    except PermissionError as pe:
-                        self.log_signal.emit(f"✕ Permission Denied: macOS blocked access to {base_name}. Go to System Settings -> Privacy & Security -> Files and Folders.")
-                    except Exception as e:
-                        self.log_signal.emit(f"✕ Skipping file error on {base_name}: {str(e)}\n")
-                    
+                    except Exception as api_error:
+                        if hasattr(img, 'close'):
+                            img.close()
+                        self.log_signal.emit(f"✕ Fatal API error during analysis: {str(api_error)}")
+                        self.log_signal.emit("🛑 Aborting the batch processing due to fatal API error.")
+                        break
+
                     self.progress_signal.emit(index + 1, total_files)
 
         except Exception as global_e:
@@ -348,6 +430,7 @@ class AIAnalysisWorker(QThread):
 
         status_msg = "Process Cancelled!" if self.is_cancelled else "AI Stage Completed! Review your grid entries."
         self.finished_signal.emit(status_msg)
+
 
 
 class FileWriteWorker(QThread):
@@ -466,6 +549,41 @@ class FileWriteWorker(QThread):
         self.finished_signal.emit(status_msg)
 
 
+class APITestWorker(QThread):
+    result_signal = pyqtSignal(bool, str)
+
+    def __init__(self, api_key, model_name):
+        super().__init__()
+        self.api_key = api_key
+        self.model_name = model_name
+
+    def run(self):
+        try:
+            genai.configure(api_key=self.api_key)
+            model = genai.GenerativeModel(self.model_name)
+            # Run a tiny prompt to verify key & model presence
+            response = model.generate_content("Ping", generation_config={"max_output_tokens": 5})
+            
+            # If we reached this line without throwing an exception, the credentials and model name are valid
+            self.result_signal.emit(True, f"Connection Successful!\n\nYour API key is valid and '{self.model_name}' is online and active.")
+        except Exception as e:
+            err_msg = str(e)
+            err_lower = err_msg.lower()
+            
+            if "api key" in err_lower or "api_key" in err_lower or "400" in err_lower:
+                friendly_msg = "Connection Failed: Invalid API Key.\n\nPlease double check that you have pasted your key correctly and that it doesn't contain any trailing spaces."
+            elif "not found" in err_lower or "404" in err_lower or "not available" in err_lower or "no longer available" in err_lower:
+                friendly_msg = f"Connection Failed: Model Not Available.\n\nThe model '{self.model_name}' is not available or has been deprecated. Please open Settings and select a recommended model."
+            elif "quota" in err_lower or "limit" in err_lower or "exhausted" in err_lower or "429" in err_lower:
+                friendly_msg = "Connection Failed: Quota/Rate Limit Exhausted.\n\nYour Gemini API quota has been exceeded or your billing details are inactive. Check your Google AI Studio billing dashboard."
+            elif "network" in err_lower or "connect" in err_lower or "unreachable" in err_lower or "unavailable" in err_lower:
+                friendly_msg = "Connection Failed: Network Error.\n\nCould not reach Google servers. Please check your internet connection and try again."
+            else:
+                friendly_msg = f"Connection Failed:\n\n{err_msg}"
+                
+            self.result_signal.emit(False, friendly_msg)
+
+
 class PhotoMetadataApp(QWidget):
     def __init__(self):
         super().__init__()
@@ -480,27 +598,33 @@ class PhotoMetadataApp(QWidget):
             "title_max_words": 7, 
             "caption_max_words": 15,
             "keyword_max_count": 25,
-            "backup_originals": True
+            "backup_originals": True,
+            "gemini_model": "gemini-3.5-flash"
         }
         
         self.init_ui()
         self.load_config()
-        self.check_exiftool()
+        self.exiftool_available = self.check_exiftool()
 
     def check_exiftool(self):
         try:
             with exiftool.ExifToolHelper(executable=find_exiftool_executable()) as et:
-                pass
+                return True
         except Exception:
             QMessageBox.critical(self, "Missing Dependency: ExifTool", 
                                  "ExifTool is not installed or cannot be found!\n\n"
                                  "This app requires ExifTool to save metadata safely.\n"
                                  "Please download the MacOS Package from exiftool.org and restart the app.")
+            self.file_label.setText("⚠️ ExifTool not found. Please install ExifTool to tag photos.")
+            self.btn_add_files.setEnabled(False)
+            self.btn_add_folder.setEnabled(False)
+            return False
 
     def init_ui(self):
         self.setWindowTitle("JR AI Photo Tagger")
         self.resize(1300, 850)
         self.setWindowIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView))
+        self.setAcceptDrops(True)
 
         main_layout = QHBoxLayout(self)
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -515,8 +639,12 @@ class PhotoMetadataApp(QWidget):
         self.api_input = QLineEdit()
         self.api_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_input.setPlaceholderText("Gemini API Key...")
+        self.btn_test_api = QPushButton("⚡ Test")
+        self.btn_test_api.clicked.connect(self.test_api_connection)
+
         row1.addWidget(QLabel("API Key:"))
         row1.addWidget(self.api_input, 2)
+        row1.addWidget(self.btn_test_api)
         
         self.btn_settings = QPushButton("⚙️ Settings")
         self.btn_settings.clicked.connect(self.open_settings)
@@ -659,6 +787,7 @@ class PhotoMetadataApp(QWidget):
                     self.app_settings["caption_max_words"] = data.get("caption_max_words", 15)
                     self.app_settings["keyword_max_count"] = data.get("keyword_max_count", 25)
                     self.app_settings["backup_originals"] = data.get("backup_originals", True)
+                    self.app_settings["gemini_model"] = data.get("gemini_model", "gemini-3.5-flash")
             except Exception:
                 pass
         
@@ -678,7 +807,8 @@ class PhotoMetadataApp(QWidget):
             "title_max_words": self.app_settings["title_max_words"],
             "caption_max_words": self.app_settings["caption_max_words"],
             "keyword_max_count": self.app_settings["keyword_max_count"],
-            "backup_originals": self.app_settings["backup_originals"]
+            "backup_originals": self.app_settings["backup_originals"],
+            "gemini_model": self.app_settings["gemini_model"]
         }
         try:
             with open(CONFIG_FILE_PATH, "w") as f:
@@ -764,7 +894,7 @@ class PhotoMetadataApp(QWidget):
             "<b>6. Live Auditing & Correction:</b> Run the AI engine by clicking <b>Generate AI</b>. Select any row in the results table to preview the image on the right and read the generated metadata instantly. You can manually edit titles, captions, and keywords directly in the table cells before committing.<br><br>"
             "<b>7. Writing & Audit Logs:</b> Click <b>Commit Changes</b> to have ExifTool embed data directly into your original image files. Every commit run automatically creates a comprehensive transaction log saved to ~/Documents/JR AI Photo Tagger/logs/ with timestamps, file names, and write status.<br><br>"
             "<b>8. Lightroom Syncing:</b> After committing, open Adobe Lightroom Classic, select your processed photos, and go to <b>Metadata → Read Metadata from File</b> to sync the newly written metadata into Lightroom's database. Your photos are now permanently archived with professional metadata.<br><br>"
-            "<b>9. Backup & Safety:</b> By default, the app keeps original file backups (.bak files) before writing metadata. You can disable this in Settings if disk space is limited, but backups are recommended for first-time users.<br><br>"
+            "<b>9. Backup & Safety:</b> By default, the app keeps original file backups (_original files) before writing metadata. You can disable this in Settings if disk space is limited, but backups are recommended for first-time users.<br><br>"
             "<b>10. Troubleshooting:</b> If you see 'API Rate Limit' warnings, the app automatically throttles requests. For permission errors, grant your app access in System Settings → Privacy & Security → Files and Folders."
         )
         dialog = QDialog(self)
@@ -994,6 +1124,57 @@ class PhotoMetadataApp(QWidget):
         
         self.force_clear_workspace()
         self.file_label.setText("Batch processing complete! Check your Documents folder for records.")
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        files_to_add = []
+        folders_to_scan = []
+        
+        for url in event.mimeData().urls():
+            local_path = url.toLocalFile()
+            if os.path.isdir(local_path):
+                folders_to_scan.append(local_path)
+            elif os.path.isfile(local_path):
+                files_to_add.append(local_path)
+                
+        if files_to_add:
+            valid_extensions = ('.arw', '.cr2', '.nef', '.dng', '.tiff', '.tif', '.jpg', '.jpeg')
+            filtered_files = [f for f in files_to_add if f.lower().endswith(valid_extensions)]
+            if filtered_files:
+                self.append_to_queue(filtered_files)
+                
+        for folder in folders_to_scan:
+            self.file_label.setText("🔍 Scanning dropped folder for photos...")
+            self.folder_scan_worker = FolderScanWorker(folder)
+            self.folder_scan_worker.progress_signal.connect(self.on_folder_scan_progress)
+            self.folder_scan_worker.files_ready_signal.connect(self.on_folder_scan_complete)
+            self.folder_scan_worker.start()
+            break
+
+    def test_api_connection(self):
+        api_key = self.api_input.text().strip()
+        if not api_key:
+            QMessageBox.warning(self, "API Test", "Please enter an API key first.")
+            return
+            
+        self.btn_test_api.setEnabled(False)
+        self.btn_test_api.setText("Testing...")
+        
+        model_name = self.app_settings.get("gemini_model", "gemini-3.5-flash")
+        self.test_worker = APITestWorker(api_key, model_name)
+        self.test_worker.result_signal.connect(self.on_api_test_complete)
+        self.test_worker.start()
+        
+    def on_api_test_complete(self, success, message):
+        self.btn_test_api.setEnabled(True)
+        self.btn_test_api.setText("⚡ Test")
+        if success:
+            QMessageBox.information(self, "API Test Success", message)
+        else:
+            QMessageBox.critical(self, "API Test Failed", message)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

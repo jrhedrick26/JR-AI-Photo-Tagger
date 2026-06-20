@@ -1,6 +1,5 @@
 name: Build Mac Application
 
-# This tells GitHub to give us a "Run Workflow" button to trigger this manually
 on:
   workflow_dispatch: 
 
@@ -27,13 +26,14 @@ jobs:
       run: |
         pyinstaller --windowed --noconfirm --name "JR AI Photo Tagger" app.py
 
-    - name: Zip the Application Bundle
+    - name: Build Standard macOS DMG File
       run: |
-        cd dist
-        zip -r "JR.AI.Photo.Tagger.zip" "JR AI Photo Tagger.app"
+        mkdir -p dist/dmg_source
+        cp -R "dist/JR AI Photo Tagger.app" dist/dmg_source/
+        hdiutil create -volname "JR AI Photo Tagger Installer" -srcfolder dist/dmg_source -ov -format UDZO dist/JR_AI_Photo_Tagger.dmg
 
-    - name: Upload the Finished ZIP File
+    - name: Upload Finished DMG File
       uses: actions/upload-artifact@v4
       with:
-        name: Mac-App-Bundle
-        path: dist/JR.AI.Photo.Tagger.zip
+        name: Mac-DMG-Installer
+        path: dist/JR_AI_Photo_Tagger.dmg

@@ -1,6 +1,6 @@
 # JR AI Photo Tagger 📸🤖
 
-An open-source, professional-grade desktop workspace that leverages Google's Gemini 2.5 Flash AI to automatically generate highly accurate, contextual, and editorial Titles, Captions, and Keywords for photography collections.
+An open-source, professional-grade desktop workspace that leverages Google's Gemini AI (defaulting to the latest Gemini 3.5 Flash) to automatically generate highly accurate, contextual, and editorial Titles, Captions, and Keywords for photography collections.
 
 It reads camera EXIF/GPS context and safely writes metadata directly inside your JPEGs, TIFFs, DNGs, and proprietary RAW formats (Sony ARW, Canon CR2, Nikon NEF) using industry-standard ExifTool.
 
@@ -108,16 +108,18 @@ Double-click `JR_AI_Photo_Tagger.exe` to start!
 
 ### Setup
 1. Enter your **Gemini API Key** (one-time setup, securely stored)
-2. Enter your **Creator Name** (appears as photo copyright holder)
-3. Enter your **Copyright Notice** (e.g., "© 2026 Your Name")
+2. Click **⚡ Test** to verify your key and connection instantly
+3. Enter your **Creator Name** (appears as photo copyright holder)
+4. Enter your **Copyright Notice** (e.g., "© 2026 Your Name")
 
 ### Processing Photos
-1. Click **+ Add Files** or **+ Add Folder** to load photos
+1. Load photos using **+ Add Files**, **+ Add Folder**, or by simply **dragging and dropping** them directly into the app window
 2. Select an **AI Style** (Standard, Real Estate, Portrait, Landscape, Drone, Street, Travel)
-3. Optionally add **Batch Notes** (e.g., "Client: ABC Corp, Event: Annual Gala")
-4. Click **Generate AI** to analyze your photos
-5. Review and edit metadata in the table
-6. Click **Commit Changes** to write metadata to your files
+3. Adjust model settings by clicking **⚙️ Settings** (select standard models like `gemini-3.5-flash` or type a custom future-proof model override)
+4. Optionally add **Batch Notes** (e.g., "Client: ABC Corp, Event: Annual Gala")
+5. Click **Generate AI** to analyze your photos
+6. Review and edit metadata in the table
+7. Click **Commit Changes** to write metadata to your files
 
 ### After Processing
 - **Lightroom Users:** Open Lightroom Classic, select your photos, go to **Metadata → Read Metadata from File** to import the newly written data

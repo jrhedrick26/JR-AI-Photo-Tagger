@@ -886,16 +886,16 @@ class PhotoMetadataApp(QWidget):
     def show_help_guide(self):
         help_text = (
             "<h3>📋 JR AI Photo Tagger Manual</h3><hr>"
-            "<b>1. Setup & Configuration:</b> Enter your Gemini API key, Creator name, and Copyright details. Your API key is securely stored on your computer using your system's credential manager, so you only need to enter it once.<br><br>"
+            "<b>1. Setup & Configuration:</b> Enter your Gemini API key, Creator name, and Copyright details. Verify your key immediately by clicking the <b>⚡ Test</b> connection button. Your key is stored securely using your system's credential manager (keychain/credentials DB), so you only need to enter it once.<br><br>"
             "<b>2. Getting Your API Key:</b> Visit <a href='https://ai.google.dev/'>https://ai.google.dev/</a> to create a free Gemini API key. New users typically get $300 in monthly free credits.<br><br>"
-            "<b>3. Adjusting AI Directives:</b> Click <b>⚙️ Settings</b> to establish word limits for titles and captions, and configure file backup protocols. Use the <b>AI Style</b> dropdown to change the semantic analysis approach for your specific photography genre.<br><br>"
+            "<b>3. Adjusting AI Directives & Models:</b> Click <b>⚙️ Settings</b> to adjust title/caption limits and file backups. Select your preferred model from the dropdown (e.g. <b>gemini-3.5-flash</b>) or type in a custom model name to future-proof the application against API updates.<br><br>"
             "<b>4. The Power of 'Batch Notes':</b> The AI only reads pixels and EXIF metadata (date, location, camera model). It cannot know client names or project details. Use the <b>Batch Notes</b> field to supply off-camera context like 'Corporate annual gala 2026' or 'Sunset beach engagement shoot'.<br><br>"
-            "<b>5. Compiling the Queue:</b> Build batches dynamically using <b>+ Add Files</b> and <b>+ Add Folder</b>. You can repeatedly add multiple folders to create deep processing pipelines. The app calculates estimated API costs in real-time based on image count.<br><br>"
+            "<b>5. Compiling the Queue:</b> Build batches using <b>+ Add Files</b>, <b>+ Add Folder</b>, or by <b>dragging and dropping</b> folders and supported files directly onto the app window. The app calculates real-time estimated API costs as files are queued.<br><br>"
             "<b>6. Live Auditing & Correction:</b> Run the AI engine by clicking <b>Generate AI</b>. Select any row in the results table to preview the image on the right and read the generated metadata instantly. You can manually edit titles, captions, and keywords directly in the table cells before committing.<br><br>"
             "<b>7. Writing & Audit Logs:</b> Click <b>Commit Changes</b> to have ExifTool embed data directly into your original image files. Every commit run automatically creates a comprehensive transaction log saved to ~/Documents/JR AI Photo Tagger/logs/ with timestamps, file names, and write status.<br><br>"
             "<b>8. Lightroom Syncing:</b> After committing, open Adobe Lightroom Classic, select your processed photos, and go to <b>Metadata → Read Metadata from File</b> to sync the newly written metadata into Lightroom's database. Your photos are now permanently archived with professional metadata.<br><br>"
             "<b>9. Backup & Safety:</b> By default, the app keeps original file backups (_original files) before writing metadata. You can disable this in Settings if disk space is limited, but backups are recommended for first-time users.<br><br>"
-            "<b>10. Troubleshooting:</b> If you see 'API Rate Limit' warnings, the app automatically throttles requests. For permission errors, grant your app access in System Settings → Privacy & Security → Files and Folders."
+            "<b>10. Troubleshooting:</b> If you see 'API Rate Limit' warnings, the app automatically throttles requests. For missing dependency warnings, verify ExifTool is installed and runnable on your system. For macOS permission errors, grant access in System Settings → Privacy & Security → Files and Folders."
         )
         dialog = QDialog(self)
         dialog.setWindowTitle("Workspace Documentation")
@@ -1126,10 +1126,12 @@ class PhotoMetadataApp(QWidget):
         self.file_label.setText("Batch processing complete! Check your Documents folder for records.")
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
+        if self.exiftool_available and event.mimeData().hasUrls():
             event.acceptProposedAction()
 
     def dropEvent(self, event):
+        if not self.exiftool_available:
+            return
         files_to_add = []
         folders_to_scan = []
         

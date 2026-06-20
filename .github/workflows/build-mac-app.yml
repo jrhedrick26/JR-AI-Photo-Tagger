@@ -1,11 +1,30 @@
-name: Build Mac Application
+name: Build Cross-Platform Applications
 
 on:
   workflow_dispatch: 
 
 jobs:
-  build-macos:
-    runs-on: macos-latest
+  build-apps:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            artifact_name: Mac-DMG-Installer
+            build_script: |
+              pyinstaller --windowed --noconfirm --name "JR AI Photo Tagger" app.py
+              mkdir -p dist/dmg_source
+              cp -R "dist/JR AI Photo Tagger.app" dist/dmg_source/
+              hdiutil create -volname "JR AI Photo Tagger Installer" -srcfolder dist/dmg_source -ov -format UDZO dist/JR_AI_Photo_Tagger.dmg
+            file_path: dist/JR_AI_Photo_Tagger.dmg
+
+          - os: windows-latest
+            artifact_name: Windows-Executable
+            build_script: |
+              pip install pydantic==2.8.2
+              pyinstaller --onefile --windowed --noconfirm --name "JR_AI_Photo_Tagger" app.py
+            file_path: dist/JR_AI_Photo_Tagger.exe
 
     steps:
     - name: Checkout Code
@@ -22,18 +41,11 @@ jobs:
         pip install pyinstaller
         pip install -r requirements.txt
 
-    - name: Build the App with PyInstaller
-      run: |
-        pyinstaller --windowed --noconfirm --name "JR AI Photo Tagger" app.py
+    - name: Run Build Script
+      run: ${{ matrix.build_script }}
 
-    - name: Build Standard macOS DMG File
-      run: |
-        mkdir -p dist/dmg_source
-        cp -R "dist/JR AI Photo Tagger.app" dist/dmg_source/
-        hdiutil create -volname "JR AI Photo Tagger Installer" -srcfolder dist/dmg_source -ov -format UDZO dist/JR_AI_Photo_Tagger.dmg
-
-    - name: Upload Finished DMG File
+    - name: Upload Finished App
       uses: actions/upload-artifact@v4
       with:
-        name: Mac-DMG-Installer
-        path: dist/JR_AI_Photo_Tagger.dmg
+        name: ${{ matrix.artifact_name }}
+        path: ${{ matrix.file_path }}

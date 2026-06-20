@@ -103,6 +103,38 @@ class ImagePreviewWorker(QThread):
                 self.preview_ready_signal.emit(QImage(), self.file_path)
 
 
+class FolderScanWorker(QThread):
+    progress_signal = pyqtSignal(str)
+    files_ready_signal = pyqtSignal(list)
+    
+    def __init__(self, folder_path):
+        super().__init__()
+        self.folder_path = folder_path
+        self.is_cancelled = False
+    
+    def run(self):
+        valid_extensions = ('.arw', '.cr2', '.nef', '.dng', '.tiff', '.tif', '.jpg', '.jpeg')
+        new_files = []
+        
+        try:
+            for root, dirs, files in os.walk(self.folder_path):
+                if self.is_cancelled:
+                    break
+                
+                for file in files:
+                    if self.is_cancelled:
+                        break
+                    
+                    if file.lower().endswith(valid_extensions):
+                        new_files.append(os.path.join(root, file))
+                        self.progress_signal.emit(f"Found {len(new_files)} photos...")
+            
+            self.files_ready_signal.emit(new_files)
+        except Exception as e:
+            self.progress_signal.emit(f"Error scanning folder: {str(e)}")
+            self.files_ready_signal.emit([])
+
+
 class SettingsDialog(QDialog):
     """A dialog window for configuring AI limits and Data Safety."""
     def __init__(self, current_settings, parent=None):
@@ -182,8 +214,10 @@ class AIAnalysisWorker(QThread):
             genai.configure(api_key=self.api_key)
             model = genai.GenerativeModel('gemini-2.5-flash')
         except Exception as e:
-            self.log_signal.emit(f"✕ API Configuration Error: {str(e)}")
-            self.log_signal.emit("💡 Get your free API key at: https://ai.google.dev/")
+            error_msg = str(e)
+            self.log_signal.emit(f"✕ API Configuration Error: {error_msg}")
+            self.log_signal.emit("💡 Verify your API key at: https://ai.google.dev/")
+            self.log_signal.emit("💡 Common issues: Invalid key, expired key, or no free credits remaining")
             self.finished_signal.emit("Configuration failed.")
             return
 
@@ -428,6 +462,7 @@ class PhotoMetadataApp(QWidget):
         self.start_time = None
         self.current_preview_pixmap = None
         self.preview_worker = None
+        self.folder_scan_worker = None
         
         self.app_settings = {
             "title_max_words": 7, 
@@ -773,6 +808,8 @@ class PhotoMetadataApp(QWidget):
         if hasattr(self, 'file_worker') and self.file_worker and self.file_worker.isRunning():
             self.file_worker.is_cancelled = True
             self.log_output.append("🛑 Cancelling Commit... waiting for current photo to finish.")
+        if self.folder_scan_worker and self.folder_scan_worker.isRunning():
+            self.folder_scan_worker.is_cancelled = True
 
     def append_to_queue(self, new_files):
         if len(new_files) > 200:
@@ -823,26 +860,30 @@ class PhotoMetadataApp(QWidget):
         if files:
             self.append_to_queue(files)
 
+    def on_folder_scan_progress(self, status_msg):
+        self.file_label.setText(status_msg)
+    
+    def on_folder_scan_complete(self, new_files):
+        if new_files:
+            self.append_to_queue(new_files)
+        else:
+            QMessageBox.information(self, "No Photos Found", "No supported photo files were found in that folder.")
+        self.folder_scan_worker = None
+
     def add_folder(self):
         if not self.check_unsaved_changes():
             return
             
         folder = QFileDialog.getExistingDirectory(self, "Select Folder")
         if folder:
-            valid_extensions = ('.arw', '.cr2', '.nef', '.dng', '.tiff', '.tif', '.jpg', '.jpeg')
-            new_files = []
+            # Show progress dialog while scanning
+            self.file_label.setText("🔍 Scanning folder for photos...")
             
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            for root, dirs, files in os.walk(folder):
-                for file in files:
-                    if file.lower().endswith(valid_extensions):
-                        new_files.append(os.path.join(root, file))
-            QApplication.restoreOverrideCursor()
-            
-            if new_files:
-                self.append_to_queue(new_files)
-            else:
-                QMessageBox.information(self, "No Photos Found", "No supported photo files were found in that folder.")
+            # Run folder scan in background thread
+            self.folder_scan_worker = FolderScanWorker(folder)
+            self.folder_scan_worker.progress_signal.connect(self.on_folder_scan_progress)
+            self.folder_scan_worker.files_ready_signal.connect(self.on_folder_scan_complete)
+            self.folder_scan_worker.start()
 
     def update_progress(self, current, total):
         self.progress_bar.setMaximum(total)

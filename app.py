@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QFileDialog, QTextEdit, QLabel, 
                              QProgressBar, QMessageBox, QLineEdit, QTableWidget, 
                              QTableWidgetItem, QHeaderView, QDialog, QStyle, 
-                             QSplitter, QComboBox, QFormLayout, QSpinBox, QDialogButtonBox)
+                             QSplitter, QComboBox, QFormLayout, QSpinBox, QDialogButtonBox, QCheckBox)
 from PyQt6.QtGui import QIcon, QPixmap, QImage
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PIL import Image
@@ -20,17 +20,27 @@ Image.MAX_IMAGE_PIXELS = None
 
 import exiftool
 
-CONFIG_FILE_PATH = "config.json"
-LOGS_DIR = "logs"
+def get_app_data_dir():
+    """Creates and returns a safe, writable directory in the user's Documents folder."""
+    home = os.path.expanduser("~")
+    app_dir = os.path.join(home, "Documents", "JR AI Photo Tagger")
+    if not os.path.exists(app_dir):
+        try:
+            os.makedirs(app_dir)
+        except Exception:
+            app_dir = os.getcwd() 
+    return app_dir
+
+APP_DIR = get_app_data_dir()
+CONFIG_FILE_PATH = os.path.join(APP_DIR, "config.json")
+LOGS_DIR = os.path.join(APP_DIR, "logs")
 
 def find_exiftool_executable():
-    """Locate ExifTool executable, checking standard macOS installation paths explicitly for standalone app context."""
-    # 1. Check default system environment PATH
+    """Locate ExifTool executable safely for standalone macOS environments."""
     path = shutil.which("exiftool")
     if path:
         return path
     
-    # 2. Check standard macOS installation paths explicitly (Homebrew / Official Pkg)
     standard_mac_paths = [
         "/opt/homebrew/bin/exiftool",
         "/usr/local/bin/exiftool"
@@ -39,27 +49,28 @@ def find_exiftool_executable():
         if os.path.exists(p) and os.access(p, os.X_OK):
             return p
             
-    return "exiftool" # Fallback to default string string if not resolved explicitly
+    return "exiftool" 
 
 
 def load_preview_image(file_path):
-    """Intelligently load images, using rawpy for proprietary RAWs and Pillow for standard formats."""
-    raw_extensions = ['.arw', '.cr2', '.nef', '.dng', '.raf', '.orf']
-    if any(file_path.lower().endswith(ext) for ext in raw_extensions):
-        try:
-            import rawpy
-            with rawpy.imread(file_path) as raw:
-                # half_size=True cuts memory usage massively and speeds up processing
-                rgb = raw.postprocess(use_camera_wb=True, half_size=True)
-            return Image.fromarray(rgb)
-        except Exception as e:
-            print(f"rawpy failed on {file_path}, falling back to standard loader. Error: {e}")
-    
-    return Image.open(file_path)
+    """Intelligently load images, handling macOS Permission constraints."""
+    try:
+        raw_extensions = ['.arw', '.cr2', '.nef', '.dng', '.raf', '.orf']
+        if any(file_path.lower().endswith(ext) for ext in raw_extensions):
+            try:
+                import rawpy
+                with rawpy.imread(file_path) as raw:
+                    rgb = raw.postprocess(use_camera_wb=True, half_size=True)
+                return Image.fromarray(rgb)
+            except Exception as e:
+                print(f"rawpy failed on {file_path}, falling back to standard loader. Error: {e}")
+        
+        return Image.open(file_path)
+    except PermissionError:
+        raise PermissionError(f"macOS blocked access to {file_path}. Please grant Folder Access in System Settings.")
 
 
 class ImagePreviewWorker(QThread):
-    """Background worker to prevent UI freezing when loading massive RAW files."""
     preview_ready_signal = pyqtSignal(QImage, str)
 
     def __init__(self, file_path):
@@ -81,17 +92,17 @@ class ImagePreviewWorker(QThread):
             if hasattr(img, 'close'):
                 img.close()
         except Exception as e:
-            print(f"Preview generation error: {e}")
+            print(f"Preview error: {e}")
             if not self.is_cancelled:
                 self.preview_ready_signal.emit(QImage(), self.file_path)
 
 
 class SettingsDialog(QDialog):
-    """A dialog window for configuring AI generation limits."""
+    """A dialog window for configuring AI limits and Data Safety."""
     def __init__(self, current_settings, parent=None):
         super().__init__(parent)
         self.setWindowTitle("AI Generation Settings")
-        self.setMinimumWidth(300)
+        self.setMinimumWidth(350)
         
         self.settings = current_settings.copy()
         
@@ -110,9 +121,13 @@ class SettingsDialog(QDialog):
         self.keyword_spin.setRange(3, 50)
         self.keyword_spin.setValue(self.settings.get("keyword_max_count", 25))
         
+        self.backup_check = QCheckBox("Keep Original File Backups (Recommended)")
+        self.backup_check.setChecked(self.settings.get("backup_originals", True))
+        
         form_layout.addRow("Max Title Words:", self.title_spin)
         form_layout.addRow("Max Caption Words:", self.caption_spin)
         form_layout.addRow("Max Keywords:", self.keyword_spin)
+        form_layout.addRow("", self.backup_check)
         
         layout.addLayout(form_layout)
         
@@ -125,7 +140,8 @@ class SettingsDialog(QDialog):
         return {
             "title_max_words": self.title_spin.value(),
             "caption_max_words": self.caption_spin.value(),
-            "keyword_max_count": self.keyword_spin.value()
+            "keyword_max_count": self.keyword_spin.value(),
+            "backup_originals": self.backup_check.isChecked()
         }
 
 
@@ -142,6 +158,7 @@ class AIAnalysisWorker(QThread):
         self.batch_context = batch_context
         self.photo_style = photo_style
         self.settings = settings
+        self.is_cancelled = False
 
     def get_image_context(self, et, file_path):
         try:
@@ -180,69 +197,104 @@ class AIAnalysisWorker(QThread):
 
         total_files = len(self.file_paths)
         
-        with exiftool.ExifToolHelper(executable=find_exiftool_executable()) as et:
-            for index, file_path in enumerate(self.file_paths):
-                if not os.path.exists(file_path):
-                    continue
-                
-                base_name = os.path.basename(file_path)
-                self.log_signal.emit(f"Analyzing visual assets for: {base_name}...")
+        try:
+            with exiftool.ExifToolHelper(executable=find_exiftool_executable()) as et:
+                for index, file_path in enumerate(self.file_paths):
+                    if self.is_cancelled:
+                        self.log_signal.emit("🛑 AI Generation cancelled by user.")
+                        break
 
-                try:
-                    gps_ctx, time_ctx = self.get_image_context(et, file_path)
+                    if not os.path.exists(file_path):
+                        continue
                     
-                    img = load_preview_image(file_path)
-                    img.thumbnail((1024, 1024))
-                    rgb_img = img.convert("RGB")
+                    base_name = os.path.basename(file_path)
+                    self.log_signal.emit(f"Analyzing visual assets for: {base_name}...")
 
-                    user_context_injection = ""
-                    if self.batch_context:
-                        user_context_injection = f"CRITICAL USER CONTEXT NOTES: Use this exact context/event/client info to guide details: '{self.batch_context}'\n"
+                    try:
+                        gps_ctx, time_ctx = self.get_image_context(et, file_path)
+                        img = load_preview_image(file_path)
+                        img.thumbnail((1024, 1024))
+                        rgb_img = img.convert("RGB")
 
-                    prompt = f"""
-                    You are an expert photography archivist creating standard Lightroom metadata. I am providing an image taken on {time_ctx} at {gps_ctx}.
-                    {user_context_injection}
-                    Read any visible text or branding on buildings or subjects. If coordinates are provided, use them for geographical context.
-                    
-                    Return a JSON object with EXACTLY these three keys: 'title', 'caption', 'keywords'.
-                    
-                    1. 'title': A highly accurate, production-ready title (max {t_max} words). Describe the primary subject clearly. To avoid repetitive titles in a batch, you MUST include the most prominent unique foreground element or specific angle (e.g., 'Overlooking Train Tracks', 'Close-Up', 'Street Level'). The title MUST read smoothly as a natural, editorial phrase (e.g., 'Aerial View of the Charlotte Skyline at Golden Hour'), rather than a clunky list of keywords. IF the lighting condition is dramatic or highly specific (e.g., 'Golden Hour', 'Blue Hour', 'Night', 'Neon'), include it. Do NOT include generic lighting terms like 'Midday' or 'Daylight' in the title.
-                    
-                    2. 'caption': A straightforward, factual catalog sentence (maximum {c_max} words) analyzed through the lens of {active_style_guide}. Describe exactly what the subject is, the setting, and the lighting. IF landmarks are visible, explicitly name the 1 or 2 most prominent ones. This MUST be a single, grammatically correct, and flowing sentence. Do NOT use semicolons, lists, or fragmented phrasing. If you hit the word limit, prioritize the main subject over extra adjectives. NEVER use flowery, poetic, or overly artistic language. Just state the facts.
-                    
-                    3. 'keywords': An array of up to {k_max} highly specific tags. Inject stylistic elements for {active_style_guide}, alongside artistic terms, accurate lighting, location, and core subjects. DO NOT use generic terms like 'picture', 'image', 'photo', or 'daytime'. DO NOT mash words together into camelCase or hashtags. Always use natural spaces between words in a single tag (e.g., use 'North Carolina' instead of 'NorthCarolina'). Ensure all Keywords are formatted in Title Case.
-                    """
-                    
-                    response = model.generate_content(
-                        [prompt, rgb_img],
-                        generation_config={"response_mime_type": "application/json"}
-                    )
+                        user_context_injection = ""
+                        if self.batch_context:
+                            user_context_injection = f"CRITICAL USER CONTEXT NOTES: Use this exact context/event/client info to guide details: '{self.batch_context}'\n"
 
-                    metadata = json.loads(response.text)
-                    kw_list = metadata.get("keywords", [])
-                    if isinstance(kw_list, str):
-                        kw_list = [k.strip() for k in kw_list.split(",") if k.strip()]
+                        prompt = f"""
+                        You are an expert photography archivist creating standard Lightroom metadata. I am providing an image taken on {time_ctx} at {gps_ctx}.
+                        {user_context_injection}
+                        Read any visible text or branding on buildings or subjects. If coordinates are provided, use them for geographical context.
+                        
+                        Return a JSON object with EXACTLY these three keys: 'title', 'caption', 'keywords'.
+                        
+                        1. 'title': A highly accurate, production-ready title (max {t_max} words). Describe the primary subject clearly. To avoid repetitive titles in a batch, you MUST include the most prominent unique foreground element or specific angle (e.g., 'Overlooking Train Tracks', 'Close-Up', 'Street Level'). The title MUST read smoothly as a natural, editorial phrase (e.g., 'Aerial View of the Charlotte Skyline at Golden Hour'), rather than a clunky list of keywords. IF the lighting condition is dramatic or highly specific (e.g., 'Golden Hour', 'Blue Hour', 'Night', 'Neon'), include it. Do NOT include generic lighting terms like 'Midday' or 'Daylight' in the title.
+                        
+                        2. 'caption': A straightforward, factual catalog sentence (maximum {c_max} words) analyzed through the lens of {active_style_guide}. Describe exactly what the subject is, the setting, and the lighting. IF landmarks are visible, explicitly name the 1 or 2 most prominent ones. This MUST be a single, grammatically correct, and flowing sentence. Do NOT use semicolons, lists, or fragmented phrasing. If you hit the word limit, prioritize the main subject over extra adjectives. NEVER use flowery, poetic, or overly artistic language. Just state the facts.
+                        
+                        3. 'keywords': An array of up to {k_max} highly specific tags. Inject stylistic elements for {active_style_guide}, alongside artistic terms, accurate lighting, location, and core subjects. DO NOT use generic terms like 'picture', 'image', 'photo', or 'daytime'. DO NOT mash words together into camelCase or hashtags. Always use natural spaces between words in a single tag (e.g., use 'North Carolina' instead of 'NorthCarolina'). Ensure all Keywords are formatted in Title Case.
+                        """
+                        
+                        # Network & Rate Limit Catching Loop
+                        success = False
+                        for attempt in range(3):
+                            if self.is_cancelled:
+                                break
+                            try:
+                                response = model.generate_content(
+                                    [prompt, rgb_img],
+                                    generation_config={"response_mime_type": "application/json"}
+                                )
+                                success = True
+                                break
+                            except Exception as api_e:
+                                err_msg = str(api_e).lower()
+                                if "429" in err_msg or "quota" in err_msg or "exhausted" in err_msg:
+                                    self.log_signal.emit(f"⚠️ API Rate Limit hit. Throttling for 15 seconds to recover...")
+                                    time.sleep(15)
+                                elif "network" in err_msg or "connect" in err_msg or "unavailable" in err_msg:
+                                    self.log_signal.emit(f"⚠️ Network connection issue. Retrying in 10 seconds...")
+                                    time.sleep(10)
+                                else:
+                                    raise api_e
+
+                        if not success and not self.is_cancelled:
+                            raise Exception("Failed after maximum network retries.")
+
+                        if self.is_cancelled:
+                            if hasattr(img, 'close'): img.close()
+                            break
+
+                        metadata = json.loads(response.text)
+                        kw_list = metadata.get("keywords", [])
+                        if isinstance(kw_list, str):
+                            kw_list = [k.strip() for k in kw_list.split(",") if k.strip()]
+                        
+                        cleaned_metadata = {
+                            "title": metadata.get("title", "").strip(),
+                            "caption": metadata.get("caption", "").strip(),
+                            "keywords": ", ".join([str(k).strip() for k in kw_list if str(k).strip()])
+                        }
+
+                        if hasattr(img, 'close'):
+                            img.close()
+
+                        self.result_ready_signal.emit(file_path, cleaned_metadata)
+                        self.log_signal.emit(f"✓ AI analysis received for {base_name}")
+                        
+                        time.sleep(3) # Standard Rate Limiter
+
+                    except PermissionError as pe:
+                        self.log_signal.emit(f"✕ Permission Denied: macOS blocked access to {base_name}. Go to System Settings -> Privacy & Security -> Files and Folders.")
+                    except Exception as e:
+                        self.log_signal.emit(f"✕ Skipping file error on {base_name}: {str(e)}\n")
                     
-                    cleaned_metadata = {
-                        "title": metadata.get("title", "").strip(),
-                        "caption": metadata.get("caption", "").strip(),
-                        "keywords": ", ".join([str(k).strip() for k in kw_list if str(k).strip()])
-                    }
+                    self.progress_signal.emit(index + 1, total_files)
 
-                    if hasattr(img, 'close'):
-                        img.close()
+        except Exception as global_e:
+            self.log_signal.emit(f"⚠️ Critical ExifTool Error: {global_e}")
 
-                    self.result_ready_signal.emit(file_path, cleaned_metadata)
-                    self.log_signal.emit(f"✓ AI analysis received for {base_name}")
-                    
-                    time.sleep(3) # Rate Limiter
-
-                except Exception as e:
-                    self.log_signal.emit(f"✕ Skipping file error on {base_name}: {str(e)}\n")
-                
-                self.progress_signal.emit(index + 1, total_files)
-
-        self.finished_signal.emit("AI Stage Completed! Review your grid entries and select a row to preview the image.")
+        status_msg = "Process Cancelled!" if self.is_cancelled else "AI Stage Completed! Review your grid entries."
+        self.finished_signal.emit(status_msg)
 
 
 class FileWriteWorker(QThread):
@@ -258,15 +310,18 @@ class FileWriteWorker(QThread):
         self.batch_context = batch_context
         self.photo_style = photo_style
         self.settings = settings
+        self.is_cancelled = False
 
     def run(self):
         start_time = time.time()
         total_files = len(self.run_data)
         success_count = 0
         
-        # Prepare Log File
         if not os.path.exists(LOGS_DIR):
-            os.makedirs(LOGS_DIR)
+            try:
+                os.makedirs(LOGS_DIR)
+            except Exception as e:
+                self.log_signal.emit(f"⚠️ Warning: Could not create logs directory: {e}")
         
         timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         log_filename = os.path.join(LOGS_DIR, f"Batch_Log_{timestamp}.txt")
@@ -279,44 +334,60 @@ class FileWriteWorker(QThread):
         log_content += f"Batch Notes: {self.batch_context}\n"
         log_content += "="*60 + "\n\n"
         
-        with exiftool.ExifToolHelper(executable=find_exiftool_executable()) as et:
-            for index, (file_path, title, caption, kw_str) in enumerate(self.run_data):
-                base_name = os.path.basename(file_path)
-                try:
-                    keywords = [k.strip() for k in kw_str.split(",") if k.strip()]
+        # Check overwrite settings
+        use_overwrite = not self.settings.get("backup_originals", True)
+        params = ["-overwrite_original"] if use_overwrite else []
 
-                    tags = {
-                        "XMP-dc:Title": title,
-                        "XMP-dc:Description": caption,
-                        "XMP-dc:Subject": keywords,
-                    }
+        try:
+            with exiftool.ExifToolHelper(executable=find_exiftool_executable()) as et:
+                for index, (file_path, title, caption, kw_str) in enumerate(self.run_data):
+                    if self.is_cancelled:
+                        self.log_signal.emit("🛑 Commit cancelled by user.")
+                        break
+
+                    base_name = os.path.basename(file_path)
+                    try:
+                        keywords = [k.strip() for k in kw_str.split(",") if k.strip()]
+
+                        tags = {
+                            "XMP-dc:Title": title,
+                            "XMP-dc:Description": caption,
+                            "XMP-dc:Subject": keywords,
+                        }
+                        
+                        if self.creator:
+                            tags["XMP-dc:Creator"] = self.creator
+                        if self.copyright_text:
+                            tags["XMP-dc:Rights"] = self.copyright_text
+
+                        et.set_tags([file_path], tags=tags, params=params)
+                        success_count += 1
+                        self.log_signal.emit(f"💾 Permanently written: {base_name}")
+                        
+                        log_content += f"File: {base_name}\nTitle: {title}\nCaption: {caption}\nKeywords: {kw_str}\n"
+                        log_content += "-"*60 + "\n"
+                        
+                    except PermissionError:
+                        self.log_signal.emit(f"✕ Permission Denied on {base_name}: macOS blocked access. Check Privacy & Security.")
+                        log_content += f"File: {base_name} -> PERMISSION DENIED\n"
+                        log_content += "-"*60 + "\n"
+                    except Exception as e:
+                        self.log_signal.emit(f"✕ Save failed on {base_name}: {str(e)}")
+                        log_content += f"File: {base_name} -> FAILED TO WRITE: {str(e)}\n"
+                        log_content += "-"*60 + "\n"
+
+                    self.progress_signal.emit(index + 1, total_files)
                     
-                    if self.creator:
-                        tags["XMP-dc:Creator"] = self.creator
-                    if self.copyright_text:
-                        tags["XMP-dc:Rights"] = self.copyright_text
+        except Exception as global_e:
+            self.log_signal.emit(f"⚠️ Critical Engine Error: ExifTool encountered a system problem. {global_e}")
+            log_content += f"\nCRITICAL ERROR: {global_e}\n"
 
-                    et.set_tags([file_path], tags=tags, params=["-overwrite_original"])
-                    success_count += 1
-                    self.log_signal.emit(f"💾 Permanently written: {base_name}")
-                    
-                    log_content += f"File: {base_name}\nTitle: {title}\nCaption: {caption}\nKeywords: {kw_str}\n"
-                    log_content += "-"*60 + "\n"
-                    
-                except Exception as e:
-                    self.log_signal.emit(f"✕ Save failed on {base_name}: {str(e)}")
-                    log_content += f"File: {base_name} -> FAILED TO WRITE: {str(e)}\n"
-                    log_content += "-"*60 + "\n"
-
-                self.progress_signal.emit(index + 1, total_files)
-
-        # Write Batch Summary Footer
         end_time = time.time()
         duration = end_time - start_time
         mins, secs = divmod(int(duration), 60)
         
         log_content += "\n" + "="*60 + "\n"
-        log_content += f"BATCH AUD SUMMARY\n"
+        log_content += f"BATCH AUDIT SUMMARY\n"
         log_content += f"Total Files Processed: {total_files}\n"
         log_content += f"Successful Writes: {success_count}\n"
         log_content += f"Failed Writes: {total_files - success_count}\n"
@@ -329,14 +400,17 @@ class FileWriteWorker(QThread):
         except Exception as e:
             self.log_signal.emit(f"⚠️ Failed to save plain text log: {str(e)}")
 
-        self.finished_signal.emit(
+        status_msg = (
+            f"Process Cancelled. Saved {success_count} files before stopping.\nCheck your Documents folder for logs." 
+            if self.is_cancelled else 
             f"Successfully saved metadata directly inside {success_count} of {total_files} file(s)!\n"
-            f"A detailed audit log has been saved to the '{LOGS_DIR}' folder.\n\n"
+            f"A detailed audit log has been saved to your Documents folder.\n\n"
             "🚨 CRITICAL LIGHTROOM REQUIREMENT:\n"
             "1. Open Adobe Lightroom Classic.\n"
             "2. Highlight these processed photos.\n"
             "3. In the top menu bar, select: Metadata -> Read Metadata from File."
         )
+        self.finished_signal.emit(status_msg)
 
 
 class PhotoMetadataApp(QWidget):
@@ -351,7 +425,8 @@ class PhotoMetadataApp(QWidget):
         self.app_settings = {
             "title_max_words": 7, 
             "caption_max_words": 15,
-            "keyword_max_count": 25
+            "keyword_max_count": 25,
+            "backup_originals": True
         }
         
         self.init_ui()
@@ -359,7 +434,6 @@ class PhotoMetadataApp(QWidget):
         self.check_exiftool()
 
     def check_exiftool(self):
-        """Startup check to ensure ExifTool is installed on the user's system."""
         try:
             with exiftool.ExifToolHelper(executable=find_exiftool_executable()) as et:
                 pass
@@ -456,6 +530,12 @@ class PhotoMetadataApp(QWidget):
         self.btn_commit.setStyleSheet("font-weight: bold;")
         btn_layout.addWidget(self.btn_commit)
         
+        self.btn_cancel = QPushButton("🛑 Stop / Cancel")
+        self.btn_cancel.clicked.connect(self.cancel_processing)
+        self.btn_cancel.setVisible(False)
+        self.btn_cancel.setStyleSheet("color: #d9534f; font-weight: bold;")
+        btn_layout.addWidget(self.btn_cancel)
+        
         self.btn_reset = QPushButton("🗑️ Clear Queue")
         self.btn_reset.clicked.connect(self.reset_workspace)
         self.btn_reset.setStyleSheet("color: #d9534f;")
@@ -524,6 +604,7 @@ class PhotoMetadataApp(QWidget):
                     self.app_settings["title_max_words"] = data.get("title_max_words", 7)
                     self.app_settings["caption_max_words"] = data.get("caption_max_words", 15)
                     self.app_settings["keyword_max_count"] = data.get("keyword_max_count", 25)
+                    self.app_settings["backup_originals"] = data.get("backup_originals", True)
             except Exception:
                 pass
 
@@ -534,7 +615,8 @@ class PhotoMetadataApp(QWidget):
             "copyright": self.copyright_input.text().strip(),
             "title_max_words": self.app_settings["title_max_words"],
             "caption_max_words": self.app_settings["caption_max_words"],
-            "keyword_max_count": self.app_settings["keyword_max_count"]
+            "keyword_max_count": self.app_settings["keyword_max_count"],
+            "backup_originals": self.app_settings["backup_originals"]
         }
         try:
             with open(CONFIG_FILE_PATH, "w") as f:
@@ -580,7 +662,7 @@ class PhotoMetadataApp(QWidget):
 
     def display_preview_image(self, qim, file_path):
         if qim.isNull():
-            self.preview_label.setText("Preview unavailable for this file format.")
+            self.preview_label.setText("Preview unavailable for this file format. Ensure macOS has granted Folder permissions.")
             self.current_preview_pixmap = None
             return
             
@@ -603,13 +685,13 @@ class PhotoMetadataApp(QWidget):
     def show_help_guide(self):
         help_text = (
             "<h3>📋 JR AI Photo Tagger Manual (macOS Edition)</h3><hr>"
-            "<b>1. Setup & Configuration:</b> Enter your Gemini API key, Creator name, and Copyright details. These profiles securely save to disk locally.<br><br>"
-            "<b>2. Adjusting AI Directives:</b> Click <b>⚙️ Settings</b> to establish word limits. Use the <b>AI Style</b> dropdown to change the semantic parsing perspective (e.g., Drone vs. Street Photography).<br><br>"
+            "<b>1. Setup & Configuration:</b> Enter your Gemini API key, Creator name, and Copyright details. These profiles securely save locally to your Documents folder.<br><br>"
+            "<b>2. Adjusting AI Directives:</b> Click <b>⚙️ Settings</b> to establish word limits and configure File Backup protocols. Use the <b>AI Style</b> dropdown to change the semantic parsing perspective (e.g., Drone vs. Street Photography).<br><br>"
             "<b>3. The Power of 'Batch Notes':</b> The AI only reads pixels and EXIF parameters. It cannot know client names or project details. Use the <b>Batch Notes</b> field to supply off-camera context <i>(e.g., 'Juneberry Jams Concert' or 'Nike Spring Catalog')</i> so the AI seamlessly links this data into captions and tags.<br><br>"
             "<b>4. Compiling the Queue:</b> Build batches dynamically using <b>+ Add Files</b> and <b>+ Add Folder</b>. You can repeatedly add multiple folders to create deep processing pipelines. The application auto-filters files for RAW sensor files (Sony ARW, Canon CR2, Nikon NEF, DNG), TIFFs, and JPEGs.<br><br>"
             "<b>5. Live Auditing & Correction:</b> Run the AI engine. Select any row to fire up fluid background preview frames and read formatted metadata card strings instantly. Double-click spreadsheet fields to execute swift edits or append corrections manually.<br><br>"
-            "<b>6. Writing & Audit Logs:</b> Click <b>Commit Changes</b> to have ExifTool embed data directly into file metadata headers. Every commit run automatically creates a comprehensive tracking log inside the local 'logs' directory, recording runtime parameters, bounds, and write results.<br><br>"
-            "<b>7. Lightroom Syncing:</b> To view your changes in Lightroom Classic, highlight your batch folder, right-click, and select <b>Metadata -> Read Metadata from File</b>."
+            "<b>6. Writing & Audit Logs:</b> Click <b>Commit Changes</b> to have ExifTool embed data directly into file metadata headers. Every commit run automatically creates a comprehensive tracking log inside the 'JR AI Photo Tagger' directory in your Mac's Documents folder.<br><br>"
+            "<b>7. Lightroom Syncing:</b> To map the files into Lightroom Classic, highlight your batch folder, right-click, and select <b>Metadata -> Read Metadata from File</b>."
         )
         dialog = QDialog(self)
         dialog.setWindowTitle("Workspace Documentation")
@@ -642,6 +724,7 @@ class PhotoMetadataApp(QWidget):
         self.file_label.setText("No files selected. Add ARW, DNG, or TIFF files to begin.")
         self.btn_run_ai.setEnabled(False)
         self.btn_commit.setEnabled(False)
+        self.btn_cancel.setVisible(False)
         self.log_output.clear()
         self.progress_bar.setValue(0)
         self.eta_label.setText("ETA: --")
@@ -655,6 +738,14 @@ class PhotoMetadataApp(QWidget):
         if not self.check_unsaved_changes():
             return
         self.force_clear_workspace()
+
+    def cancel_processing(self):
+        if hasattr(self, 'ai_worker') and self.ai_worker and self.ai_worker.isRunning():
+            self.ai_worker.is_cancelled = True
+            self.log_output.append("🛑 Cancelling AI Generation... waiting for current photo to finish.")
+        if hasattr(self, 'file_worker') and self.file_worker and self.file_worker.isRunning():
+            self.file_worker.is_cancelled = True
+            self.log_output.append("🛑 Cancelling Commit... waiting for current photo to finish.")
 
     def append_to_queue(self, new_files):
         if len(new_files) > 200:
@@ -756,6 +847,7 @@ class PhotoMetadataApp(QWidget):
         self.btn_run_ai.setEnabled(False)
         self.btn_commit.setEnabled(False)
         self.btn_reset.setEnabled(False)
+        self.btn_cancel.setVisible(True)
         
         style = self.style_dropdown.currentText()
         context = self.context_input.text().strip()
@@ -780,6 +872,7 @@ class PhotoMetadataApp(QWidget):
         self.btn_add_folder.setEnabled(True)
         self.btn_commit.setEnabled(True)
         self.btn_reset.setEnabled(True)
+        self.btn_cancel.setVisible(False)
         
         if self.table.rowCount() > 0:
             self.table.selectRow(0)
@@ -797,6 +890,7 @@ class PhotoMetadataApp(QWidget):
         self.btn_run_ai.setEnabled(False)
         self.btn_commit.setEnabled(False)
         self.btn_reset.setEnabled(False)
+        self.btn_cancel.setVisible(True)
 
         creator = self.creator_input.text().strip()
         copyright_txt = self.copyright_input.text().strip()
@@ -816,9 +910,10 @@ class PhotoMetadataApp(QWidget):
         self.btn_add_files.setEnabled(True)
         self.btn_add_folder.setEnabled(True)
         self.btn_reset.setEnabled(True)
+        self.btn_cancel.setVisible(False)
         
         self.force_clear_workspace()
-        self.file_label.setText("Batch processing complete! Check 'logs' folder for records.")
+        self.file_label.setText("Batch processing complete! Check your Documents folder for records.")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

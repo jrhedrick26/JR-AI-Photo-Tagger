@@ -85,13 +85,18 @@ def extract_embedded_preview(file_path):
             return None
             
     preview_tags = ["-PreviewImage", "-JpgFromRaw", "-ThumbnailImage"]
+    kwargs = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = 0x08000000  # subprocess.CREATE_NO_WINDOW
+        
     for tag in preview_tags:
         try:
             res = subprocess.run(
                 [exiftool_path, "-b", tag, file_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                timeout=5
+                timeout=5,
+                **kwargs
             )
             if res.returncode == 0 and len(res.stdout) > 100:
                 return res.stdout
@@ -876,7 +881,7 @@ class PhotoMetadataApp(QWidget):
 
     def display_preview_image(self, qim, file_path):
         if qim.isNull():
-            self.preview_label.setText("Preview unavailable for this file format. Ensure macOS has granted Folder permissions.")
+            self.preview_label.setText("Preview unavailable. Ensure the file is not corrupted and folder permissions are granted.")
             self.current_preview_pixmap = None
             return
             
@@ -1023,6 +1028,10 @@ class PhotoMetadataApp(QWidget):
             self.append_to_queue(new_files)
         else:
             QMessageBox.information(self, "No Photos Found", "No supported photo files were found in that folder.")
+            if self.selected_files:
+                self.file_label.setText(f"Loaded {len(self.selected_files)} file(s). Ready for processing.")
+            else:
+                self.file_label.setText("No files selected. Add ARW, DNG, or TIFF files to begin.")
         self.folder_scan_worker = None
 
     def add_folder(self):
@@ -1057,6 +1066,10 @@ class PhotoMetadataApp(QWidget):
                 self.eta_label.setText("ETA: Complete")
 
     def run_ai_analysis(self):
+        if not self.selected_files:
+            QMessageBox.warning(self, "Empty Queue", "Please add supported photos before generating metadata.")
+            return
+
         api_key = self.api_input.text().strip()
         if not api_key:
             QMessageBox.warning(self, "Missing API Key", "Please paste your Gemini API key.\n\nGet a free key at: https://ai.google.dev/")
@@ -1102,11 +1115,29 @@ class PhotoMetadataApp(QWidget):
 
     def commit_grid_to_files(self):
         run_data = []
+        pending_count = 0
         for file_path, row_idx in self.grid_data_map.items():
-            title = self.table.item(row_idx, 1).text().strip()
-            caption = self.table.item(row_idx, 2).text().strip()
-            keywords = self.table.item(row_idx, 3).text().strip()
+            title = self.table.item(row_idx, 1).text().strip() if self.table.item(row_idx, 1) else ""
+            caption = self.table.item(row_idx, 2).text().strip() if self.table.item(row_idx, 2) else ""
+            keywords = self.table.item(row_idx, 3).text().strip() if self.table.item(row_idx, 3) else ""
+            
+            if title == "Pending AI..." or caption == "Pending AI..." or keywords == "Pending AI...":
+                pending_count += 1
+                continue
+                
             run_data.append((file_path, title, caption, keywords))
+
+        if not run_data:
+            QMessageBox.warning(self, "No Metadata to Commit", "There is no completed AI metadata in the grid to write.")
+            return
+
+        if pending_count > 0:
+            reply = QMessageBox.question(self, 'Unfinished Metadata', 
+                                         f'{pending_count} file(s) are still pending AI analysis. Committing now will skip these files. Proceed?',
+                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
+                                         QMessageBox.StandardButton.No)
+            if reply == QMessageBox.StandardButton.No:
+                return
 
         self.btn_add_files.setEnabled(False)
         self.btn_add_folder.setEnabled(False)

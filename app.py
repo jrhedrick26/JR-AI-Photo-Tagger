@@ -639,11 +639,18 @@ class PhotoMetadataApp(QWidget):
         self.api_input = QLineEdit()
         self.api_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_input.setPlaceholderText("Gemini API Key...")
+        
+        self.btn_reveal_api = QPushButton("👁️")
+        self.btn_reveal_api.setToolTip("Show/Hide API Key")
+        self.btn_reveal_api.setFixedWidth(30)
+        self.btn_reveal_api.clicked.connect(self.toggle_api_visibility)
+        
         self.btn_test_api = QPushButton("⚡ Test")
         self.btn_test_api.clicked.connect(self.test_api_connection)
 
         row1.addWidget(QLabel("API Key:"))
         row1.addWidget(self.api_input, 2)
+        row1.addWidget(self.btn_reveal_api)
         row1.addWidget(self.btn_test_api)
         
         self.btn_settings = QPushButton("⚙️ Settings")
@@ -823,6 +830,12 @@ class PhotoMetadataApp(QWidget):
                 keyring.set_password(KEYRING_SERVICE_NAME, KEYRING_API_KEY_USER, api_key)
             except KeyringError:
                 # Keyring unavailable; API key will need to be re-entered next time
+                pass
+        else:
+            try:
+                keyring.delete_password(KEYRING_SERVICE_NAME, KEYRING_API_KEY_USER)
+            except Exception:
+                # Password already deleted or keyring unavailable
                 pass
 
     def open_settings(self):
@@ -1174,9 +1187,18 @@ class PhotoMetadataApp(QWidget):
         self.btn_test_api.setEnabled(True)
         self.btn_test_api.setText("⚡ Test")
         if success:
+            self.save_config() # Persist the new key immediately on successful validation!
             QMessageBox.information(self, "API Test Success", message)
         else:
             QMessageBox.critical(self, "API Test Failed", message)
+
+    def toggle_api_visibility(self):
+        if self.api_input.echoMode() == QLineEdit.EchoMode.Password:
+            self.api_input.setEchoMode(QLineEdit.EchoMode.Normal)
+            self.btn_reveal_api.setText("🔒")
+        else:
+            self.api_input.setEchoMode(QLineEdit.EchoMode.Password)
+            self.btn_reveal_api.setText("👁️")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
